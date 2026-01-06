@@ -125,6 +125,35 @@ def palette_cycle(phase01: float):
     return normalize_max255(blended)
 
 
+def start_transition(transition, start_color, end_color, duration, start_time):
+    transition["start_color"] = start_color
+    transition["end_color"] = end_color
+    transition["start_time"] = start_time
+    transition["duration"] = duration
+    transition["active"] = True
+
+
+def transition_color(transition, now, finalize=True):
+    if not transition["active"]:
+        return transition["end_color"]
+
+    duration = transition["duration"]
+    if duration <= 0:
+        if finalize:
+            transition["active"] = False
+        return transition["end_color"]
+
+    t = (now - transition["start_time"]) / duration
+    if t >= 1.0:
+        if finalize:
+            transition["active"] = False
+            transition["start_color"] = transition["end_color"]
+        return transition["end_color"]
+
+    eased = smoothstep(t)
+    return blend_rgbw(transition["start_color"], transition["end_color"], eased)
+
+
 # ============================================================
 # STATE
 # ============================================================
@@ -133,30 +162,77 @@ a_on = False  # LED A toggle
 b_on = False  # LED B toggle
 effect_on = False
 
+transition_a = {
+    "start_color": OFF,
+    "end_color": OFF,
+    "start_time": 0.0,
+    "duration": 0.0,
+    "active": False,
+}
+
+transition_b = {
+    "start_color": OFF,
+    "end_color": OFF,
+    "start_time": 0.0,
+    "duration": 0.0,
+    "active": False,
+}
+
 # ============================================================
 # MAIN LOOP
 # ============================================================
 
 while True:
+    now = time.monotonic()
     # ----- button edge detection -----
     for i, b in enumerate(buttons):
         pressed = b.value
         if pressed and not last_pressed[i]:
+            current_a = transition_color(transition_a, now, finalize=False)
+            current_b = transition_color(transition_b, now, finalize=False)
             # Button A: always works
             if i == 0:
-                a_on = not a_on
+                # Cross-fade from B -> A
+                if b_on and not a_on:
+                    a_on = True
+                    b_on = False
+                    start_transition(transition_a, current_a, WARM_WHITE, 1.0, now)
+                    start_transition(transition_b, current_b, OFF, 1.0, now)
+                else:
+                    a_on = not a_on
+                    start_transition(
+                        transition_a,
+                        current_a,
+                        WARM_WHITE if a_on else OFF,
+                        0.5,
+                        now,
+                    )
             # Button B: only when effect is OFF
             elif i == 1:
                 if not effect_on:
-                    b_on = not b_on
+                    if a_on and not b_on:
+                        a_on = False
+                        b_on = True
+                        start_transition(transition_a, current_a, OFF, 1.0, now)
+                        start_transition(transition_b, current_b, MOONLIGHT, 1.0, now)
+                    else:
+                        b_on = not b_on
+                        start_transition(
+                            transition_b,
+                            current_b,
+                            MOONLIGHT if b_on else OFF,
+                            0.5,
+                            now,
+                        )
             # Effect button: toggles river effect and forces B off
             elif i == 2:
                 effect_on = not effect_on
                 if effect_on:
                     b_on = False
+                    start_transition(transition_b, current_b, OFF, 0.5, now)
         last_pressed[i] = pressed
     # ----- Render LED A (unaffected by effect) -----
-    pixels[LED_A] = WARM_WHITE if a_on else OFF
+    pixels[LED_A] = transition_color(transition_a, now)
 
     # ----- Render B or effect -----
     if effect_on:
@@ -187,7 +263,7 @@ while True:
         pixels[LED_B] = palette_cycle(phase_a)
         pixels[LED_C] = palette_cycle(phase_b)
     else:
-        pixels[LED_B] = MOONLIGHT if b_on else OFF
+        pixels[LED_B] = transition_color(transition_b, now)
         pixels[LED_C] = OFF
     pixels.show()
     time.sleep(0.01)
